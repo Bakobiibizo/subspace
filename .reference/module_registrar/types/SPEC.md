@@ -1,34 +1,34 @@
-use frame_support::pallet_prelude::*;
-use sp_core::H256;
-use sp_runtime::{Percent, traits::Zero};
-use sp_std::prelude::*;
+# Types Component Specification
 
-/// Constants for type bounds
-pub const MAX_MODULE_ID_LEN: u32 = 32;
-pub const MAX_URL_LEN: u32 = 256;
-pub const MAX_VALIDATORS_PER_MODULE: u32 = 10;
-pub const MAX_DELEGATORS_PER_VALIDATOR: u32 = 100;
+## Purpose
+Defines core types, traits, and interfaces used throughout the Module Registrar Pallet.
 
+## Dependencies
+```toml
+[dependencies]
+frame_support = { workspace = true }
+sp-std = { workspace = true }
+sp-runtime = { workspace = true }
+parity-scale-codec = { workspace = true, features = ["derive"] }
+scale-info = { workspace = true, features = ["derive"] }
+```
+
+## Core Types
+```rust
 /// Type for module identifier
-pub type ModuleId = BoundedVec<u8, ConstU32<MAX_MODULE_ID_LEN>>;
+pub type ModuleId = BoundedVec<u8, MaxModuleIdLen>;
 
 /// Type for URL storage with bounded length
-pub type Url = BoundedVec<u8, ConstU32<MAX_URL_LEN>>;
+pub type Url = BoundedVec<u8, MaxUrlLen>;
 
 /// Core information about a registered module
 #[derive(Encode, Decode, Clone, PartialEq, Eq, RuntimeDebug, MaxEncodedLen, TypeInfo)]
 pub struct ModuleInfo<AccountId, Balance> {
-    /// Owner of the module
     pub owner: AccountId,
-    /// Module metadata
     pub metadata: ModuleMetadata,
-    /// Current state
     pub state: ModuleState,
-    /// Staked amount
     pub stake: Balance,
-    /// List of authorized validators
-    pub validators: BoundedVec<AccountId, ConstU32<MAX_VALIDATORS_PER_MODULE>>,
-    /// Trust score
+    pub validators: BoundedVec<AccountId, MaxValidatorsPerModule>,
     pub trust_score: u32,
 }
 
@@ -52,7 +52,10 @@ pub enum ModuleState {
     Suspended,  // Temporarily disabled
     Deprecated, // No longer supported
 }
+```
 
+## Validation Types
+```rust
 /// Validator staking information
 #[derive(Encode, Decode, Clone, PartialEq, Eq, RuntimeDebug, MaxEncodedLen, TypeInfo)]
 pub struct ValidatorStake<AccountId, Balance> {
@@ -60,13 +63,13 @@ pub struct ValidatorStake<AccountId, Balance> {
     pub total_stake: Balance,
     pub self_stake: Balance,
     pub delegated_stake: Balance,
-    pub delegators: BoundedVec<(AccountId, Balance), ConstU32<MAX_DELEGATORS_PER_VALIDATOR>>,
+    pub delegators: BoundedVec<(AccountId, Balance), MaxDelegatorsPerValidator>,
     pub commission_rate: Percent,
 }
 
 /// Requirements for validators
 #[derive(Encode, Decode, Clone, PartialEq, Eq, RuntimeDebug, MaxEncodedLen, TypeInfo)]
-pub struct ValidatorRequirements<BlockNumber> {
+pub struct ValidatorRequirements {
     pub min_self_stake: u64,
     pub min_total_stake: u64,
     pub max_commission_rate: Percent,
@@ -104,7 +107,10 @@ impl ValidatorWeights {
         weights
     }
 }
+```
 
+## Economic Types
+```rust
 /// Information about unbonding stakes
 #[derive(Encode, Decode, Clone, PartialEq, Eq, RuntimeDebug, MaxEncodedLen, TypeInfo)]
 pub struct UnbondingInfo<AccountId, Balance, BlockNumber> {
@@ -125,13 +131,41 @@ pub struct ResourceUsage {
 }
 
 /// Validation result with performance metrics
-#[derive(Encode, Decode, Clone, PartialEq, Eq, RuntimeDebug, TypeInfo)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, RuntimeDebug, MaxEncodedLen, TypeInfo)]
 pub struct ValidationResult {
     pub ipfs_hash: H256,
-    pub performance_metrics: BoundedVec<(BoundedVec<u8, ConstU32<32>>, u32), ConstU32<100>>,
+    pub performance_metrics: BTreeMap<Vec<u8>, u32>,
     pub resource_usage: ResourceUsage,
 }
+```
 
+## Constants
+```rust
+/// Constants for type bounds
+pub const MAX_MODULE_ID_LEN: u32 = 32;
+pub const MAX_URL_LEN: u32 = 256;
+pub const MAX_VALIDATORS_PER_MODULE: u32 = 10;
+pub const MAX_DELEGATORS_PER_VALIDATOR: u32 = 100;
+```
+
+## Error Types
+```rust
+/// Common error types
+#[derive(Debug)]
+pub enum Error {
+    ModuleNotFound,
+    InvalidState,
+    InsufficientStake,
+    TooManyValidators,
+    TooManyDelegators,
+    InvalidCommissionRate,
+    ValidationInProgress,
+    UnbondingInProgress,
+}
+```
+
+## Traits
+```rust
 /// Helper trait for stake management
 pub trait StakeHandler {
     type AccountId;
@@ -151,16 +185,25 @@ pub trait ModuleValidator {
     fn calculate_trust_score(metrics: &ValidationResult) -> u32;
     fn is_validator(account: &Self::AccountId) -> bool;
 }
+```
 
-/// Common error types
-#[derive(Debug)]
-pub enum Error {
-    ModuleNotFound,
-    InvalidState,
-    InsufficientStake,
-    TooManyValidators,
-    TooManyDelegators,
-    InvalidCommissionRate,
-    ValidationInProgress,
-    UnbondingInProgress,
-}
+## Usage Guidelines
+1. Type Safety
+   - Use strong typing for all values
+   - Implement proper error handling
+   - Use bounded vectors for lists
+
+2. Encoding
+   - All types must implement Encode/Decode, MaxEncodedLen, and TypeInfo
+   - Use proper scale encoding
+   - Handle versioning
+
+3. Performance
+   - Minimize storage impact
+   - Optimize for common operations
+   - Consider gas costs
+
+4. Integration
+   - Maintain consistent interfaces
+   - Use standard traits
+   - Follow Substrate patterns

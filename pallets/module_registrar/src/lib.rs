@@ -1,7 +1,8 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 pub use pallet::*;
-pub use types::*;
+// Re-export types but not Error to avoid ambiguity
+pub use types::{ModuleId, ModuleInfo, ModuleMetadata, ModuleState, ValidatorStake, ValidatorRequirements, ValidatorWeights, UnbondingInfo, ResourceUsage, ValidationResult};
 
 #[cfg(test)]
 mod mock;
@@ -17,6 +18,8 @@ use frame_support::{
     traits::{Currency, ReservableCurrency},
 };
 use frame_system::pallet_prelude::*;
+use sp_runtime::traits::Zero;
+use crate::weights::WeightInfo;
 
 type BalanceOf<T> = <<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
 
@@ -114,6 +117,126 @@ pub mod pallet {
 
     #[pallet::call]
     impl<T: Config> Pallet<T> {
-        // Implementation will be added in subsequent updates
+        #[pallet::call_index(0)]
+        #[pallet::weight(T::WeightInfo::register_module())]
+        pub fn register_module(
+            origin: OriginFor<T>,
+            module_id: ModuleId,
+            metadata: ModuleMetadata,
+            stake: BalanceOf<T>,
+        ) -> DispatchResult {
+            let owner = ensure_signed(origin)?;
+
+            // Validate module ID and check it doesn't exist
+            ensure!(!Modules::<T>::contains_key(&module_id), Error::<T>::ModuleAlreadyExists);
+            ensure!(!stake.is_zero(), Error::<T>::InvalidStakeAmount);
+
+            // Reserve the stake amount
+            T::Currency::reserve(&owner, stake)?;
+
+            // Create new module info
+            let module_info = ModuleInfo {
+                owner: owner.clone(),
+                metadata,
+                state: ModuleState::Pending,
+                stake,
+                validators: BoundedVec::default(),
+                trust_score: 0,
+            };
+
+            // Store module info
+            Modules::<T>::insert(&module_id, module_info);
+
+            // Emit event
+            Self::deposit_event(Event::ModuleRegistered { 
+                module_id, 
+                owner 
+            });
+
+            Ok(())
+        }
+
+        #[pallet::call_index(1)]
+        #[pallet::weight(T::WeightInfo::update_module())]
+        pub fn update_module(
+            origin: OriginFor<T>,
+            module_id: ModuleId,
+            metadata: ModuleMetadata,
+        ) -> DispatchResult {
+            let caller = ensure_signed(origin)?;
+
+            // Get and validate module
+            Modules::<T>::try_mutate(&module_id, |maybe_module| -> DispatchResult {
+                let module = maybe_module.as_mut().ok_or(Error::<T>::ModuleNotFound)?;
+                ensure!(module.owner == caller, Error::<T>::NotAuthorized);
+
+                // Update metadata
+                module.metadata = metadata;
+
+                Ok(())
+            })?;
+
+            // Emit event
+            Self::deposit_event(Event::ModuleUpdated { module_id });
+
+            Ok(())
+        }
+
+        #[pallet::call_index(2)]
+        #[pallet::weight(T::WeightInfo::change_module_state())]
+        pub fn change_module_state(
+            origin: OriginFor<T>,
+            module_id: ModuleId,
+            new_state: ModuleState,
+        ) -> DispatchResult {
+            let caller = ensure_signed(origin)?;
+
+            // Get and validate module
+            Modules::<T>::try_mutate(&module_id, |maybe_module| -> DispatchResult {
+                let module = maybe_module.as_mut().ok_or(Error::<T>::ModuleNotFound)?;
+                ensure!(module.owner == caller, Error::<T>::NotAuthorized);
+
+                // Validate state transition
+                Self::validate_state_transition(&module.state, &new_state)?;
+
+                // Update state
+                module.state = new_state.clone();
+
+                Ok(())
+            })?;
+
+            // Emit event
+            Self::deposit_event(Event::ModuleStateChanged { 
+                module_id, 
+                new_state 
+            });
+
+            Ok(())
+        }
+    }
+
+    impl<T: Config> Pallet<T> {
+        /// Helper function to validate state transitions
+        fn validate_state_transition(
+            current_state: &ModuleState,
+            new_state: &ModuleState,
+        ) -> Result<(), Error<T>> {
+            match (current_state, new_state) {
+                // Allow transition from Pending to Active or Suspended
+                (ModuleState::Pending, ModuleState::Active) |
+                (ModuleState::Pending, ModuleState::Suspended) => Ok(()),
+                
+                // Allow transition from Active to Suspended or Deprecated
+                (ModuleState::Active, ModuleState::Suspended) |
+                (ModuleState::Active, ModuleState::Deprecated) => Ok(()),
+                
+                // Allow transition from Suspended to Active or Deprecated
+                (ModuleState::Suspended, ModuleState::Active) |
+                (ModuleState::Suspended, ModuleState::Deprecated) => Ok(()),
+                
+                // All other transitions are invalid
+                _ => Err(Error::<T>::InvalidModuleState),
+            }
+        }
     }
 }
