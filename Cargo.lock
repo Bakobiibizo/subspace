@@ -6325,6 +6325,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "pallet-module-registrar"
+version = "0.1.0"
+dependencies = [
+ "frame-benchmarking",
+ "frame-support",
+ "frame-system",
+ "parity-scale-codec",
+ "scale-info",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
+ "sp-std",
+]
+
+[[package]]
 name = "pallet-multisig"
 version = "38.0.0"
 source = "git+https://github.com/paritytech/polkadot-sdk?tag=polkadot-stable2409#87971b3e92721bdf10bf40b410eaae779d494ca0"
