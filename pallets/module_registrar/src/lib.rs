@@ -1,8 +1,10 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 pub use pallet::*;
-// Re-export types but not Error to avoid ambiguity
-pub use types::{ModuleId, ModuleInfo, ModuleMetadata, ModuleState, ValidatorStake, ValidatorRequirements, ValidatorWeights, UnbondingInfo, ResourceUsage, ValidationResult};
+
+pub mod validation;
+pub mod types;
+pub mod weights;
 
 #[cfg(test)]
 mod mock;
@@ -10,233 +12,189 @@ mod mock;
 #[cfg(test)]
 mod tests;
 
-pub mod types;
-pub mod weights;
-
-use frame_support::{
-    pallet_prelude::*,
-    traits::{Currency, ReservableCurrency},
-};
-use frame_system::pallet_prelude::*;
-use sp_runtime::traits::Zero;
-use crate::weights::WeightInfo;
-
-type BalanceOf<T> = <<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
-
 #[frame_support::pallet]
 pub mod pallet {
     use super::*;
+    use frame_support::{
+        pallet_prelude::*,
+        traits::{Currency, LockableCurrency},
+    };
+    use frame_system::pallet_prelude::*;
+    use scale_info::TypeInfo;
 
-    #[pallet::config]
-    pub trait Config: frame_system::Config {
-        type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
-        type Currency: Currency<Self::AccountId> + ReservableCurrency<Self::AccountId>;
-        type WeightInfo: weights::WeightInfo;
-        type BlockNumber: Member + Parameter + Default + Copy + MaxEncodedLen + From<u32>;
-    }
+    pub type BalanceOf<T> = <<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
 
     #[pallet::pallet]
     pub struct Pallet<T>(_);
 
-    #[pallet::storage]
-    #[pallet::getter(fn modules)]
-    pub type Modules<T: Config> = StorageMap<
-        _,
-        Blake2_128Concat,
-        ModuleId,
-        ModuleInfo<T::AccountId, BalanceOf<T>>,
-        OptionQuery,
-    >;
+    #[pallet::config]
+    pub trait Config: frame_system::Config + TypeInfo {
+        type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
+        type Currency: LockableCurrency<Self::AccountId, Moment = Self::BlockNumber>;
+        type WeightInfo: weights::WeightInfo;
+        type BlockNumber: Member + Parameter + Default + Copy + MaxEncodedLen + From<u32>;
+
+        #[pallet::constant]
+        type MaxValidatorsPerSet: Get<u32>;
+
+        #[pallet::constant]
+        type MaxSlashingEvents: Get<u32>;
+    }
 
     #[pallet::storage]
-    #[pallet::getter(fn validator_stakes)]
-    pub type ValidatorStakes<T: Config> = StorageMap<
+    pub type ValidatorStake<T: Config> = StorageMap<
         _,
         Blake2_128Concat,
         T::AccountId,
-        ValidatorStake<T::AccountId, BalanceOf<T>>,
-        OptionQuery,
+        types::ValidatorStake<T::AccountId, BalanceOf<T>>,
+        OptionQuery
     >;
 
     #[pallet::storage]
-    #[pallet::getter(fn unbonding_info)]
-    pub type UnbondingInfos<T: Config> = StorageMap<
+    #[pallet::storage_prefix = "ValidatorPerformance"]
+    pub type ValidatorPerformanceStorage<T: Config> = StorageMap<
         _,
         Blake2_128Concat,
         T::AccountId,
-        UnbondingInfo<T::AccountId, BalanceOf<T>, T::BlockNumber>,
-        OptionQuery,
+        validation::ValidatorPerformanceMetrics<T>,
+        OptionQuery
+    >;
+
+    #[pallet::storage]
+    pub type ValidatorScores<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        T::AccountId,
+        validation::ValidationScore,
+        ValueQuery
+    >;
+
+    #[pallet::storage]
+    pub type ValidatorTrustScores<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        T::AccountId,
+        u32,
+        ValueQuery
+    >;
+
+    #[pallet::storage]
+    pub type SlashingEvents<T: Config> = StorageValue<
+        _,
+        BoundedVec<types::SlashEvent<T::AccountId, BalanceOf<T>, BlockNumberFor<T>>, T::MaxSlashingEvents>,
+        ValueQuery
+    >;
+
+    #[pallet::storage]
+    pub type ActiveValidatorSet<T: Config> = StorageValue<
+        _,
+        BoundedVec<T::AccountId, T::MaxValidatorsPerSet>,
+        ValueQuery
     >;
 
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
-        ModuleRegistered {
-            module_id: ModuleId,
-            owner: T::AccountId,
-        },
-        ModuleUpdated {
-            module_id: ModuleId,
-        },
-        ModuleStateChanged {
-            module_id: ModuleId,
-            new_state: ModuleState,
-        },
-        ValidatorAdded {
-            module_id: ModuleId,
-            validator: T::AccountId,
-        },
-        ValidatorRemoved {
-            module_id: ModuleId,
-            validator: T::AccountId,
-        },
-        StakeAdded {
-            account: T::AccountId,
-            amount: BalanceOf<T>,
-        },
-        StakeRemoved {
-            account: T::AccountId,
-            amount: BalanceOf<T>,
-        },
+        /// A new validator has been registered
+        ValidatorRegistered(T::AccountId),
+        /// A validator has been slashed
+        ValidatorSlashed(T::AccountId, BalanceOf<T>),
+        /// The validator set has been rotated
+        ValidatorSetRotated(Vec<T::AccountId>),
     }
 
     #[pallet::error]
     pub enum Error<T> {
-        ModuleNotFound,
-        ModuleAlreadyExists,
-        InvalidModuleId,
+        /// Invalid module state transition
         InvalidModuleState,
-        InvalidStakeAmount,
-        InsufficientBalance,
-        NotAuthorized,
-        TooManyValidators,
+        /// Validator not found
         ValidatorNotFound,
+        /// Validator already exists
         ValidatorAlreadyExists,
-        UnbondingInProgress,
+        /// Insufficient stake
+        InsufficientStake,
+        /// Too many validators
+        TooManyValidators,
+        /// Too many slashing events
+        TooManySlashingEvents,
+        /// Not authorized
+        NotAuthorized,
     }
 
     #[pallet::call]
     impl<T: Config> Pallet<T> {
-        #[pallet::call_index(0)]
-        #[pallet::weight(T::WeightInfo::register_module())]
-        pub fn register_module(
+        #[pallet::call_index(20)]
+        #[pallet::weight(10_000)]
+        pub fn register_validator(
             origin: OriginFor<T>,
-            module_id: ModuleId,
-            metadata: ModuleMetadata,
             stake: BalanceOf<T>,
+            requirements: types::ValidatorRequirements<BlockNumberFor<T>>,
         ) -> DispatchResult {
-            let owner = ensure_signed(origin)?;
-
-            // Validate module ID and check it doesn't exist
-            ensure!(!Modules::<T>::contains_key(&module_id), Error::<T>::ModuleAlreadyExists);
-            ensure!(!stake.is_zero(), Error::<T>::InvalidStakeAmount);
-
-            // Reserve the stake amount
-            T::Currency::reserve(&owner, stake)?;
-
-            // Create new module info
-            let module_info = ModuleInfo {
-                owner: owner.clone(),
-                metadata,
-                state: ModuleState::Pending,
-                stake,
-                validators: BoundedVec::default(),
-                trust_score: 0,
-            };
-
-            // Store module info
-            Modules::<T>::insert(&module_id, module_info);
-
-            // Emit event
-            Self::deposit_event(Event::ModuleRegistered { 
-                module_id, 
-                owner 
-            });
-
-            Ok(())
+            let who = ensure_signed(origin)?;
+            Self::do_register_validator(&who, stake, requirements)
         }
 
-        #[pallet::call_index(1)]
-        #[pallet::weight(T::WeightInfo::update_module())]
-        pub fn update_module(
+        #[pallet::call_index(21)]
+        #[pallet::weight(10_000)]
+        pub fn report_validator_performance(
             origin: OriginFor<T>,
-            module_id: ModuleId,
-            metadata: ModuleMetadata,
+            validator: T::AccountId,
+            success: bool,
         ) -> DispatchResult {
-            let caller = ensure_signed(origin)?;
-
-            // Get and validate module
-            Modules::<T>::try_mutate(&module_id, |maybe_module| -> DispatchResult {
-                let module = maybe_module.as_mut().ok_or(Error::<T>::ModuleNotFound)?;
-                ensure!(module.owner == caller, Error::<T>::NotAuthorized);
-
-                // Update metadata
-                module.metadata = metadata;
-
-                Ok(())
-            })?;
-
-            // Emit event
-            Self::deposit_event(Event::ModuleUpdated { module_id });
-
-            Ok(())
+            let who = ensure_signed(origin)?;
+            ensure!(Self::is_authorized_reporter(&who), Error::<T>::NotAuthorized);
+            Self::update_validator_performance(&validator, success)
         }
 
-        #[pallet::call_index(2)]
-        #[pallet::weight(T::WeightInfo::change_module_state())]
-        pub fn change_module_state(
+        #[pallet::call_index(22)]
+        #[pallet::weight(10_000)]
+        pub fn slash_validator(
             origin: OriginFor<T>,
-            module_id: ModuleId,
-            new_state: ModuleState,
+            validator: T::AccountId,
+            amount: BalanceOf<T>,
         ) -> DispatchResult {
-            let caller = ensure_signed(origin)?;
+            let who = ensure_signed(origin)?;
+            ensure!(Self::is_governance(&who), Error::<T>::NotAuthorized);
+            Self::do_slash_validator(&validator, amount)
+        }
 
-            // Get and validate module
-            Modules::<T>::try_mutate(&module_id, |maybe_module| -> DispatchResult {
-                let module = maybe_module.as_mut().ok_or(Error::<T>::ModuleNotFound)?;
-                ensure!(module.owner == caller, Error::<T>::NotAuthorized);
+        #[pallet::call_index(23)]
+        #[pallet::weight(10_000)]
+        pub fn rotate_validator_set(
+            origin: OriginFor<T>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            ensure!(Self::is_governance(&who), Error::<T>::NotAuthorized);
+            
+            // Update scores first
+            Self::calculate_validator_scores()?;
+            
+            // Select top validators
+            let top_validators = Self::select_top_validators(T::MaxValidatorsPerSet::get());
+            
+            // Update active set
+            ActiveValidatorSet::<T>::try_mutate(|set| {
+                *set = BoundedVec::try_from(top_validators.clone())
+                    .map_err(|_| Error::<T>::TooManyValidators)?;
 
-                // Validate state transition
-                Self::validate_state_transition(&module.state, &new_state)?;
-
-                // Update state
-                module.state = new_state.clone();
-
+                // Emit event
+                Self::deposit_event(Event::ValidatorSetRotated(top_validators));
                 Ok(())
-            })?;
-
-            // Emit event
-            Self::deposit_event(Event::ModuleStateChanged { 
-                module_id, 
-                new_state 
-            });
-
-            Ok(())
+            })
         }
     }
 
     impl<T: Config> Pallet<T> {
-        /// Helper function to validate state transitions
-        fn validate_state_transition(
-            current_state: &ModuleState,
-            new_state: &ModuleState,
-        ) -> Result<(), Error<T>> {
-            match (current_state, new_state) {
-                // Allow transition from Pending to Active or Suspended
-                (ModuleState::Pending, ModuleState::Active) |
-                (ModuleState::Pending, ModuleState::Suspended) => Ok(()),
-                
-                // Allow transition from Active to Suspended or Deprecated
-                (ModuleState::Active, ModuleState::Suspended) |
-                (ModuleState::Active, ModuleState::Deprecated) => Ok(()),
-                
-                // Allow transition from Suspended to Active or Deprecated
-                (ModuleState::Suspended, ModuleState::Active) |
-                (ModuleState::Suspended, ModuleState::Deprecated) => Ok(()),
-                
-                // All other transitions are invalid
-                _ => Err(Error::<T>::InvalidModuleState),
-            }
+        /// Check if an account is authorized to report validator performance
+        pub(crate) fn is_authorized_reporter(_who: &T::AccountId) -> bool {
+            // TODO: Implement proper authorization check
+            true
+        }
+
+        /// Check if an account has governance privileges
+        pub(crate) fn is_governance(_who: &T::AccountId) -> bool {
+            // TODO: Implement proper governance check
+            true
         }
     }
 }

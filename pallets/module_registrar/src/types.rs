@@ -164,3 +164,10 @@ pub enum Error {
     ValidationInProgress,
     UnbondingInProgress,
 }
+
+#[derive(Encode, Decode, Clone, PartialEq, Eq, RuntimeDebug, MaxEncodedLen, TypeInfo)]
+pub struct SlashEvent<AccountId, Balance, BlockNumber> {
+    pub validator: AccountId,
+    pub amount: Balance,
+    pub block: BlockNumber,
+}
