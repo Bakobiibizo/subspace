@@ -17,8 +17,9 @@ pub mod pallet {
     use super::*;
     use frame_support::{
         pallet_prelude::*,
-        traits::{Currency, LockableCurrency},
+        traits::{Currency, LockableCurrency, LockIdentifier, WithdrawReasons},
     };
+
     use frame_system::pallet_prelude::*;
     use scale_info::TypeInfo;
 
@@ -39,7 +40,18 @@ pub mod pallet {
 
         #[pallet::constant]
         type MaxSlashingEvents: Get<u32>;
+
+        #[pallet::constant]
+        type MaxModulesPerValidator: Get<u32>;
+
+        #[pallet::constant]
+        type MaxModuleIdLen: Get<u32>;
+
+        #[pallet::constant]
+        type MaxModuleGaps: Get<u32>;
     }
+
+    const LOCK_ID: LockIdentifier = *b"modulerg";
 
     #[pallet::storage]
     pub type ValidatorStake<T: Config> = StorageMap<
@@ -48,6 +60,22 @@ pub mod pallet {
         T::AccountId,
         types::ValidatorStake<T::AccountId, BalanceOf<T>>,
         OptionQuery
+    >;
+
+    #[pallet::storage]
+    pub type ModuleInfo<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        types::ModuleId,
+        types::ModuleInfo<T::AccountId, BalanceOf<T>>,
+        OptionQuery
+    >;
+
+    #[pallet::storage]
+    pub type ModuleGaps<T: Config> = StorageValue<
+        _,
+        BoundedVec<types::ModuleId, T::MaxModuleGaps>,
+        ValueQuery
     >;
 
     #[pallet::storage]
@@ -101,6 +129,14 @@ pub mod pallet {
         ValidatorSlashed(T::AccountId, BalanceOf<T>),
         /// The validator set has been rotated
         ValidatorSetRotated(Vec<T::AccountId>),
+        /// A new module has been registered
+        ModuleRegistered(types::ModuleId, T::AccountId),
+        /// A module has been updated
+        ModuleUpdated(types::ModuleId),
+        /// A module has been removed
+        ModuleRemoved(types::ModuleId),
+        /// A module's state has changed
+        ModuleStateChanged(types::ModuleId, types::ModuleState),
     }
 
     #[pallet::error]
@@ -119,6 +155,16 @@ pub mod pallet {
         TooManySlashingEvents,
         /// Not authorized
         NotAuthorized,
+        /// Module not found
+        ModuleNotFound,
+        /// Module already exists
+        ModuleAlreadyExists,
+        /// Too many modules
+        TooManyModules,
+        /// Invalid module ID
+        InvalidModuleId,
+        /// Invalid module metadata
+        InvalidMetadata,
     }
 
     #[pallet::call]
@@ -132,6 +178,50 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             Self::do_register_validator(&who, stake, requirements)
+        }
+
+        #[pallet::call_index(24)]
+        #[pallet::weight(10_000)]
+        pub fn register_module(
+            origin: OriginFor<T>,
+            module_id: types::ModuleId,
+            metadata: types::ModuleMetadata,
+            stake: BalanceOf<T>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::do_register_module(&who, module_id, metadata, stake)
+        }
+
+        #[pallet::call_index(25)]
+        #[pallet::weight(10_000)]
+        pub fn update_module(
+            origin: OriginFor<T>,
+            module_id: types::ModuleId,
+            metadata: types::ModuleMetadata,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::do_update_module(&who, module_id, metadata)
+        }
+
+        #[pallet::call_index(26)]
+        #[pallet::weight(10_000)]
+        pub fn remove_module(
+            origin: OriginFor<T>,
+            module_id: types::ModuleId,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::do_remove_module(&who, module_id)
+        }
+
+        #[pallet::call_index(27)]
+        #[pallet::weight(10_000)]
+        pub fn change_module_state(
+            origin: OriginFor<T>,
+            module_id: types::ModuleId,
+            new_state: types::ModuleState,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::transition_module_state(&who, module_id, new_state)
         }
 
         #[pallet::call_index(21)]
@@ -195,6 +285,119 @@ pub mod pallet {
         pub(crate) fn is_governance(_who: &T::AccountId) -> bool {
             // TODO: Implement proper governance check
             true
+        }
+
+        /// Register a new module
+        pub fn do_register_module(
+            who: &T::AccountId,
+            module_id: types::ModuleId,
+            metadata: types::ModuleMetadata,
+            stake: BalanceOf<T>,
+        ) -> DispatchResult {
+            // Ensure module doesn't already exist
+            ensure!(!ModuleInfo::<T>::contains_key(&module_id), Error::<T>::ModuleAlreadyExists);
+
+            // Validate module ID length
+            ensure!(module_id.len() <= T::MaxModuleIdLen::get() as usize, Error::<T>::InvalidModuleId);
+
+            // Create module info
+            let module_info = types::ModuleInfo {
+                owner: who.clone(),
+                metadata: metadata.clone(),
+                state: types::ModuleState::Pending,
+                stake,
+                validators: BoundedVec::default(),
+                trust_score: 0,
+            };
+
+            // Store module info
+            ModuleInfo::<T>::insert(&module_id, module_info);
+
+            // Lock stake
+            T::Currency::set_lock(
+                LOCK_ID,
+                who,
+                stake,
+                WithdrawReasons::all(),
+            );
+
+            // Initialize module gaps
+            ModuleGaps::<T>::mutate(|gaps| {
+                if let Some(pos) = gaps.iter().position(|id| id == &module_id) {
+                    gaps.remove(pos);
+                }
+            });
+
+            // Emit event
+            Self::deposit_event(Event::ModuleRegistered(module_id.clone(), who.clone()));
+
+            Ok(())
+        }
+
+        /// Update a module's metadata
+        pub fn do_update_module(
+            who: &T::AccountId,
+            module_id: types::ModuleId,
+            metadata: types::ModuleMetadata,
+        ) -> DispatchResult {
+            ModuleInfo::<T>::try_mutate(&module_id, |maybe_info| -> DispatchResult {
+                let info = maybe_info.as_mut().ok_or(Error::<T>::ModuleNotFound)?;
+                ensure!(info.owner == *who, Error::<T>::NotAuthorized);
+                
+                info.metadata = metadata;
+                Self::deposit_event(Event::ModuleUpdated(module_id.clone()));
+                Ok(())
+            })
+        }
+
+        /// Remove a module
+        pub fn do_remove_module(
+            who: &T::AccountId,
+            module_id: types::ModuleId,
+        ) -> DispatchResult {
+            let info = ModuleInfo::<T>::get(&module_id).ok_or(Error::<T>::ModuleNotFound)?;
+            ensure!(info.owner == *who, Error::<T>::NotAuthorized);
+
+            // Return stake to owner
+            T::Currency::remove_lock(LOCK_ID, who);
+
+            // Clean up storage
+            ModuleInfo::<T>::remove(&module_id);
+            ModuleGaps::<T>::try_mutate(|gaps| -> DispatchResult {
+                gaps.try_push(module_id.clone())
+                    .map_err(|_| Error::<T>::TooManyModules)?;
+                Ok(())
+            })?;
+
+            // Emit event
+            Self::deposit_event(Event::ModuleRemoved(module_id));
+
+            Ok(())
+        }
+
+        /// Change module state
+        pub fn transition_module_state(
+            who: &T::AccountId,
+            module_id: types::ModuleId,
+            new_state: types::ModuleState,
+        ) -> DispatchResult {
+            ModuleInfo::<T>::try_mutate(&module_id, |maybe_info| -> DispatchResult {
+                let info = maybe_info.as_mut().ok_or(Error::<T>::ModuleNotFound)?;
+                ensure!(info.owner == *who || Self::is_governance(who), Error::<T>::NotAuthorized);
+
+                // Validate state transition
+                match (info.state.clone(), new_state.clone()) {
+                    (types::ModuleState::Pending, types::ModuleState::Active) => {},
+                    (types::ModuleState::Active, types::ModuleState::Suspended) => {},
+                    (types::ModuleState::Suspended, types::ModuleState::Active) => {},
+                    (_, types::ModuleState::Deprecated) => {},
+                    _ => return Err(Error::<T>::InvalidModuleState.into()),
+                }
+
+                info.state = new_state.clone();
+                Self::deposit_event(Event::ModuleStateChanged(module_id.clone(), new_state));
+                Ok(())
+            })
         }
     }
 }
