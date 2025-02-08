@@ -3,7 +3,7 @@ use frame_support::{
     pallet_prelude::*,
     traits::{Currency, LockIdentifier, LockableCurrency, WithdrawReasons},
 };
-use frame_system::pallet_prelude::BlockNumberFor;
+use frame_system::{pallet_prelude::BlockNumberFor, Config as SystemConfig};
 use sp_runtime::{
     traits::{Zero, Saturating},
     Percent, SaturatedConversion,
@@ -14,7 +14,10 @@ use scale_info::TypeInfo;
 const VALIDATOR_LOCK_ID: LockIdentifier = *b"validatr";
 
 #[derive(Encode, Decode, Clone, PartialEq, Eq, RuntimeDebug, MaxEncodedLen, TypeInfo)]
-pub struct ValidatorPerformanceMetrics<T: Config> {
+pub struct ValidatorPerformanceMetrics<T: Config>
+where
+    <T as pallet_governance::Config>::Currency: LockableCurrency<<T as SystemConfig>::AccountId>,
+{
     pub total_validations: u32,
     pub successful_validations: u32,
     pub failed_validations: u32,
@@ -22,7 +25,10 @@ pub struct ValidatorPerformanceMetrics<T: Config> {
     pub last_update: BlockNumberFor<T>,
 }
 
-impl<T: Config> Default for ValidatorPerformanceMetrics<T> {
+impl<T: Config> Default for ValidatorPerformanceMetrics<T>
+where
+    <T as pallet_governance::Config>::Currency: LockableCurrency<<T as SystemConfig>::AccountId>,
+{
     fn default() -> Self {
         Self {
             total_validations: 0,
@@ -88,7 +94,10 @@ impl ValidationScore {
     }
 }
 
-impl<T: Config + TypeInfo> Pallet<T> {
+impl<T: Config + TypeInfo> Pallet<T>
+where
+    <T as pallet_governance::Config>::Currency: LockableCurrency<<T as SystemConfig>::AccountId>,
+{
     // Register a new validator
     pub fn do_register_validator(
         who: &T::AccountId,
@@ -100,7 +109,7 @@ impl<T: Config + TypeInfo> Pallet<T> {
         ensure!(stake >= min_stake, Error::<T>::InsufficientStake);
 
         // Lock the stake
-        T::Currency::set_lock(
+        <<T as pallet_governance::Config>::Currency as LockableCurrency<T::AccountId>>::set_lock(
             VALIDATOR_LOCK_ID,
             who,
             stake,
@@ -224,7 +233,7 @@ impl<T: Config + TypeInfo> Pallet<T> {
                 / total_stake.into();
 
             // Slash validator's self stake
-            T::Currency::slash(who, self_slash);
+            <T as pallet_governance::Config>::Currency::slash(who, self_slash);
             validator.self_stake = validator.self_stake.saturating_sub(self_slash);
             validator.total_stake = validator.total_stake.saturating_sub(slash_amount);
 

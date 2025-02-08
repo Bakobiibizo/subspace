@@ -504,6 +504,18 @@ impl pallet_subnet_emission::Config for Runtime {
     type WeightInfo = pallet_subnet_emission::weights::SubstrateWeight<Runtime>;
 }
 
+impl pallet_module_registrar::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type Currency = Balances;
+    type WeightInfo = pallet_module_registrar::weights::SubstrateWeight<Runtime>;
+    type BlockNumber = BlockNumber;
+    type MaxValidatorsPerSet = ConstU32<100>;
+    type MaxSlashingEvents = ConstU32<1000>;
+    type MaxModulesPerValidator = ConstU32<50>;
+    type MaxModuleIdLen = ConstU32<32>;
+    type MaxModuleGaps = ConstU32<1000>;
+}
+
 #[cfg(feature = "testnet-faucet")]
 impl pallet_faucet::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
@@ -647,6 +659,7 @@ construct_runtime!(
         GovernanceModule: pallet_governance,
         SubnetEmissionModule: pallet_subnet_emission,
         Offworker: pallet_offworker,
+        ModuleRegistrar: pallet_module_registrar,
 
         #[cfg(feature = "testnet-faucet")]
         FaucetModule: pallet_faucet,

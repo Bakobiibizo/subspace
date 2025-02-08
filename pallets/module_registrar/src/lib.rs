@@ -1,6 +1,6 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
-pub use pallet::*;
+pub use crate::pallet::*;
 
 pub mod validation;
 pub mod types;
@@ -19,34 +19,52 @@ pub mod pallet {
         pallet_prelude::*,
         traits::{Currency, LockableCurrency, LockIdentifier, WithdrawReasons},
     };
+    use pallet_governance;
 
     use frame_system::pallet_prelude::*;
     use scale_info::TypeInfo;
+    use sp_runtime::Vec;
 
-    pub type BalanceOf<T> = <<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
+    pub type BalanceOf<T> = <<T as pallet_governance::Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
 
     #[pallet::pallet]
+    #[pallet::without_storage_info]
     pub struct Pallet<T>(_);
 
     #[pallet::config]
-    pub trait Config: frame_system::Config + TypeInfo {
+    pub trait Config: frame_system::Config + pallet_governance::Config + TypeInfo
+    where
+        <Self as pallet_governance::Config>::Currency: LockableCurrency<<Self as frame_system::Config>::AccountId>,
+    {
+        /// The runtime event type
         type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
-        type Currency: LockableCurrency<Self::AccountId, Moment = Self::BlockNumber>;
-        type WeightInfo: weights::WeightInfo;
-        type BlockNumber: Member + Parameter + Default + Copy + MaxEncodedLen + From<u32>;
 
+        /// Weight information for this pallet's extrinsics
+        type WeightInfo: weights::WeightInfo;
+
+        /// Maximum number of validators per set
         #[pallet::constant]
         type MaxValidatorsPerSet: Get<u32>;
 
+        /// Maximum number of slashing events to track
         #[pallet::constant]
         type MaxSlashingEvents: Get<u32>;
 
+        /// The currency type
+        type Currency: LockableCurrency<Self::AccountId>;
+
+        /// The block number type
+        type BlockNumber;
+
+        /// Maximum number of modules per validator
         #[pallet::constant]
         type MaxModulesPerValidator: Get<u32>;
 
+        /// Maximum length of a module ID
         #[pallet::constant]
         type MaxModuleIdLen: Get<u32>;
 
+        /// Maximum number of module gaps to track
         #[pallet::constant]
         type MaxModuleGaps: Get<u32>;
     }
@@ -63,20 +81,10 @@ pub mod pallet {
     >;
 
     #[pallet::storage]
-    pub type ModuleInfo<T: Config> = StorageMap<
-        _,
-        Blake2_128Concat,
-        types::ModuleId,
-        types::ModuleInfo<T::AccountId, BalanceOf<T>>,
-        OptionQuery
-    >;
+    pub type ModuleInfo<T: Config> = StorageMap<_, Blake2_128Concat, types::ModuleId, types::ModuleInfo<T::AccountId, BalanceOf<T>>, OptionQuery>;
 
     #[pallet::storage]
-    pub type ModuleGaps<T: Config> = StorageValue<
-        _,
-        BoundedVec<types::ModuleId, T::MaxModuleGaps>,
-        ValueQuery
-    >;
+    pub type ModuleGaps<T: Config> = StorageValue<_, BoundedVec<types::ModuleId, T::MaxModuleGaps>, ValueQuery>;
 
     #[pallet::storage]
     #[pallet::storage_prefix = "ValidatorPerformance"]
@@ -122,7 +130,10 @@ pub mod pallet {
 
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
-    pub enum Event<T: Config> {
+    pub enum Event<T: Config>
+    where
+        <T as pallet_governance::Config>::Currency: LockableCurrency<<T as frame_system::Config>::AccountId>,
+    {
         /// A new validator has been registered
         ValidatorRegistered(T::AccountId),
         /// A validator has been slashed
@@ -159,6 +170,8 @@ pub mod pallet {
         ModuleNotFound,
         /// Module already exists
         ModuleAlreadyExists,
+        /// Insufficient balance to perform operation
+        InsufficientBalance,
         /// Too many modules
         TooManyModules,
         /// Invalid module ID
@@ -168,7 +181,10 @@ pub mod pallet {
     }
 
     #[pallet::call]
-    impl<T: Config> Pallet<T> {
+    impl<T: Config> Pallet<T>
+    where
+        <T as pallet_governance::Config>::Currency: LockableCurrency<<T as frame_system::Config>::AccountId>,
+    {
         #[pallet::call_index(20)]
         #[pallet::weight(10_000)]
         pub fn register_validator(
@@ -274,17 +290,30 @@ pub mod pallet {
         }
     }
 
-    impl<T: Config> Pallet<T> {
+    impl<T: Config> Pallet<T>
+    where
+        <T as pallet_governance::Config>::Currency: LockableCurrency<<T as frame_system::Config>::AccountId>,
+    {
+        /// Get module info for a given module ID
+        pub fn get_module(module_id: &types::ModuleId) -> Option<types::ModuleInfo<T::AccountId, BalanceOf<T>>> {
+            ModuleInfo::<T>::get(module_id)
+        }
+
+        /// Alias for get_module
+        pub fn module_info(module_id: &types::ModuleId) -> Option<types::ModuleInfo<T::AccountId, BalanceOf<T>>> {
+            Self::get_module(module_id)
+        }
+
         /// Check if an account is authorized to report validator performance
-        pub(crate) fn is_authorized_reporter(_who: &T::AccountId) -> bool {
-            // TODO: Implement proper authorization check
-            true
+        pub(crate) fn is_authorized_reporter(who: &T::AccountId) -> bool {
+            // Check if the account is in the legitimate whitelist
+            pallet_governance::Pallet::<T>::is_in_legit_whitelist(who)
         }
 
         /// Check if an account has governance privileges
-        pub(crate) fn is_governance(_who: &T::AccountId) -> bool {
-            // TODO: Implement proper governance check
-            true
+        pub(crate) fn is_governance(who: &T::AccountId) -> bool {
+            // Check if the account is the curator in governance
+            pallet_governance::Curator::<T>::get() == *who
         }
 
         /// Register a new module
@@ -294,11 +323,28 @@ pub mod pallet {
             metadata: types::ModuleMetadata,
             stake: BalanceOf<T>,
         ) -> DispatchResult {
-            // Ensure module doesn't already exist
-            ensure!(!ModuleInfo::<T>::contains_key(&module_id), Error::<T>::ModuleAlreadyExists);
-
             // Validate module ID length
             ensure!(module_id.len() <= T::MaxModuleIdLen::get() as usize, Error::<T>::InvalidModuleId);
+
+            // Check if module exists and is not in gaps
+            ensure!(!ModuleInfo::<T>::contains_key(&module_id), Error::<T>::ModuleAlreadyExists);
+
+            // Check if this module ID is in the gaps list
+            ModuleGaps::<T>::try_mutate(|gaps| -> DispatchResult {
+                if let Some(pos) = gaps.iter().position(|id| id == &module_id) {
+                    gaps.remove(pos);
+                }
+                Ok(())
+            })?;
+
+            // Check and lock stake
+            ensure!(<T as pallet_governance::Config>::Currency::free_balance(who) >= stake, Error::<T>::InsufficientBalance);
+            <<T as pallet_governance::Config>::Currency as LockableCurrency<T::AccountId>>::set_lock(
+                LOCK_ID,
+                who,
+                stake,
+                WithdrawReasons::all(),
+            );
 
             // Create module info
             let module_info = types::ModuleInfo {
@@ -312,21 +358,6 @@ pub mod pallet {
 
             // Store module info
             ModuleInfo::<T>::insert(&module_id, module_info);
-
-            // Lock stake
-            T::Currency::set_lock(
-                LOCK_ID,
-                who,
-                stake,
-                WithdrawReasons::all(),
-            );
-
-            // Initialize module gaps
-            ModuleGaps::<T>::mutate(|gaps| {
-                if let Some(pos) = gaps.iter().position(|id| id == &module_id) {
-                    gaps.remove(pos);
-                }
-            });
 
             // Emit event
             Self::deposit_event(Event::ModuleRegistered(module_id.clone(), who.clone()));
@@ -359,10 +390,12 @@ pub mod pallet {
             ensure!(info.owner == *who, Error::<T>::NotAuthorized);
 
             // Return stake to owner
-            T::Currency::remove_lock(LOCK_ID, who);
+            <<T as pallet_governance::Config>::Currency as LockableCurrency<T::AccountId>>::remove_lock(LOCK_ID, who);
 
             // Clean up storage
             ModuleInfo::<T>::remove(&module_id);
+
+            // Add to gaps list
             ModuleGaps::<T>::try_mutate(|gaps| -> DispatchResult {
                 gaps.try_push(module_id.clone())
                     .map_err(|_| Error::<T>::TooManyModules)?;

@@ -21,6 +21,7 @@ pallet-governance = { path = "../pallets/governance", default-features = false }
 pallet-subnet-emission = { path = "../pallets/subnet_emission", default-features = false }
 pallet-subspace = { path = "../pallets/subspace", default-features = false }
 pallet-offworker = { path = "../pallets/offworker", default-features = false }
+pallet-module-registrar = { path = "../pallets/module_registrar", default-features = false }
 
 smallvec.workspace = true
 parity-scale-codec.workspace = true
@@ -111,6 +112,7 @@ std = [
     "pallet-governance/std",
     "pallet-offworker/std",
     "pallet-faucet/std",
+    "pallet-module-registrar/std",
     "pallet-aura/std",
     "pallet-balances/std",
     "pallet-grandpa/std",
@@ -159,6 +161,7 @@ runtime-benchmarks = [
     "pallet-subspace/runtime-benchmarks",
     "pallet-governance/runtime-benchmarks",
     "pallet-subnet-emission/runtime-benchmarks",
+    "pallet-module-registrar/runtime-benchmarks",
     "pallet-ethereum/runtime-benchmarks",
     "pallet-evm/runtime-benchmarks",
 ]
@@ -177,6 +180,7 @@ try-runtime = [
     "pallet-offworker/try-runtime",
     "pallet-faucet/try-runtime",
     "pallet-subspace/try-runtime",
+    "pallet-module-registrar/try-runtime",
     "pallet-sudo/try-runtime",
     "pallet-timestamp/try-runtime",
     "pallet-transaction-payment/try-runtime",
